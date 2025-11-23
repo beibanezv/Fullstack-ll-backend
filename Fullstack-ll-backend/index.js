@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { Pool } from 'pg';
 import bcrypt from 'bcryptjs';
@@ -82,7 +83,48 @@ function adminOnly(req, res, next) {
 	next();
 }
 
-app.get('/api/mensaje', (req, res) => res.json({ mensaje: 'Hola desde el backend' }));
+
+// Ensure announcements table exists (if DB configured)
+async function ensureAnnouncementsTable() {
+	if (!pool) return;
+	try {
+		await pool.query(`
+			CREATE TABLE IF NOT EXISTS announcements (
+				id SERIAL PRIMARY KEY,
+				text TEXT NOT NULL,
+				active BOOLEAN DEFAULT false,
+				starts_at TIMESTAMP NULL,
+				ends_at TIMESTAMP NULL,
+				created_at TIMESTAMP DEFAULT now(),
+				updated_at TIMESTAMP DEFAULT now()
+			)
+		`);
+	} catch (err) {
+		console.error('Error ensuring announcements table:', err.message || err);
+	}
+}
+ensureAnnouncementsTable();
+
+// Public message endpoint: returns active announcement from DB if present
+app.get('/api/mensaje', async (req, res) => {
+	if (!pool) return res.json({ mensaje: 'Hola desde el backend (DB no configurada)' });
+	try {
+		const q = `SELECT id, text, active, starts_at, ends_at, created_at, updated_at
+			FROM announcements
+			WHERE active = true
+			AND (starts_at IS NULL OR starts_at <= now())
+			AND (ends_at IS NULL OR ends_at >= now())
+			ORDER BY updated_at DESC
+			LIMIT 1`;
+		const r = await pool.query(q);
+		if (r.rowCount === 0) return res.json({ mensaje: 'Hola desde el backend', db: true, announcement: null });
+		const ann = r.rows[0];
+		return res.json({ mensaje: ann.text, db: true, announcement: ann });
+	} catch (err) {
+		console.error('Error fetching announcement:', err.message || err);
+		return res.status(200).json({ mensaje: 'Hola desde el backend', db: true, error: String(err.message || err) });
+	}
+});
 
 // Auth: register
 app.post('/api/auth/register', async (req, res) => {
@@ -273,6 +315,163 @@ app.get('/api/users', authMiddleware, adminOnly, async (req, res) => {
 	}
 });
 
+// Announcements management (admin)
+app.get('/api/announcements', authMiddleware, adminOnly, async (req, res) => {
+	try {
+		const r = await pool.query('SELECT id, text, active, starts_at, ends_at, created_at, updated_at FROM announcements ORDER BY updated_at DESC');
+		res.json(r.rows);
+	} catch (err) {
+		console.error('Error listing announcements:', err.message || err);
+		res.status(500).json({ error: 'Server error' });
+	}
+});
+
+app.post('/api/announcements', authMiddleware, adminOnly, async (req, res) => {
+	try {
+		const { text, active, starts_at, ends_at } = req.body;
+		if (!text || String(text).trim().length === 0) return res.status(400).json({ error: 'Text required' });
+		const r = await pool.query(
+			'INSERT INTO announcements(text, active, starts_at, ends_at) VALUES($1,$2,$3,$4) RETURNING id, text, active, starts_at, ends_at, created_at, updated_at',
+			[String(text), !!active, starts_at || null, ends_at || null]
+		);
+		res.status(201).json(r.rows[0]);
+	} catch (err) {
+		console.error('Error creating announcement:', err.message || err);
+		res.status(500).json({ error: 'Server error' });
+	}
+});
+
+app.put('/api/announcements/:id', authMiddleware, adminOnly, async (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		const { text, active, starts_at, ends_at } = req.body;
+		const sets = [];
+		const vals = [];
+		let idx = 1;
+		if (text !== undefined) { sets.push(`text=$${idx++}`); vals.push(String(text)); }
+		if (active !== undefined) { sets.push(`active=$${idx++}`); vals.push(!!active); }
+		if (starts_at !== undefined) { sets.push(`starts_at=$${idx++}`); vals.push(starts_at || null); }
+		if (ends_at !== undefined) { sets.push(`ends_at=$${idx++}`); vals.push(ends_at || null); }
+		if (sets.length === 0) return res.status(400).json({ error: 'No fields' });
+		// update updated_at
+		sets.push(`updated_at=now()`);
+		const q = `UPDATE announcements SET ${sets.join(', ')} WHERE id=$${idx} RETURNING id, text, active, starts_at, ends_at, created_at, updated_at`;
+		vals.push(id);
+		const r = await pool.query(q, vals);
+		if (r.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+		res.json(r.rows[0]);
+	} catch (err) {
+		console.error('Error updating announcement:', err.message || err);
+		res.status(500).json({ error: 'Server error' });
+	}
+});
+
+app.delete('/api/announcements/:id', authMiddleware, adminOnly, async (req, res) => {
+	try {
+		const id = Number(req.params.id);
+		console.log(`DELETE /api/announcements/${id} requested by user ${req.user && req.user.id}`);
+		const r = await pool.query('DELETE FROM announcements WHERE id=$1 RETURNING id', [id]);
+		if (r.rowCount === 0) {
+			console.log(`Announcement id=${id} not found`);
+			return res.status(404).json({ error: 'Not found' });
+		}
+		console.log(`Announcement id=${id} deleted by user ${req.user && req.user.id}`);
+		res.json({ message: 'Deleted' });
+	} catch (err) {
+		console.error('Error deleting announcement:', err.message || err);
+		res.status(500).json({ error: 'Server error' });
+	}
+});
+
+// Orders
+app.post('/api/orders', authMiddleware, async (req, res) => {
+	const { items } = req.body; // items: [{ product_id, qty }]
+	if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'No items' });
+	const client = await pool.connect();
+	try {
+		await client.query('BEGIN');
+		// calculate total and validate stock
+		let total = 0;
+		for (const it of items) {
+			const pid = Number(it.product_id);
+			const qty = Number(it.qty);
+			if (!pid || qty <= 0) throw new Error('Invalid item');
+			const r = await client.query('SELECT id, price, stock FROM products WHERE id=$1 LIMIT 1', [pid]);
+			if (r.rowCount === 0) throw new Error(`Product ${pid} not found`);
+			const p = r.rows[0];
+			if (p.stock < qty) throw new Error(`Insufficient stock for product ${pid}`);
+			total += Number(p.price) * qty;
+		}
+		// insert order
+		const orderR = await client.query('INSERT INTO orders(user_id, total) VALUES($1,$2) RETURNING id, user_id, total, status, created_at', [req.user.id, total]);
+		const order = orderR.rows[0];
+		// insert order items and update stock
+		for (const it of items) {
+			const pid = Number(it.product_id);
+			const qty = Number(it.qty);
+			const prodR = await client.query('SELECT price FROM products WHERE id=$1 LIMIT 1', [pid]);
+			const price = prodR.rows[0].price;
+			await client.query('INSERT INTO order_items(order_id, product_id, qty, price) VALUES($1,$2,$3,$4)', [order.id, pid, qty, price]);
+			await client.query('UPDATE products SET stock = stock - $1 WHERE id=$2', [qty, pid]);
+		}
+		await client.query('COMMIT');
+		res.status(201).json({ order });
+	} catch (err) {
+		await client.query('ROLLBACK');
+		console.error('Error creating order:', err.message || err);
+		res.status(400).json({ error: String(err.message || err) });
+	} finally {
+		client.release();
+	}
+});
+
+app.get('/api/orders', authMiddleware, async (req, res) => {
+	try {
+		let q;
+		let vals = [];
+		if (req.user.is_admin) {
+			q = `SELECT o.id, o.user_id, o.total, o.status, o.created_at,
+			COALESCE(json_agg(json_build_object('id', oi.id, 'product_id', oi.product_id, 'qty', oi.qty, 'price', oi.price)) FILTER (WHERE oi.id IS NOT NULL), '[]') AS items
+			FROM orders o
+			LEFT JOIN order_items oi ON oi.order_id = o.id
+			GROUP BY o.id ORDER BY o.id`;
+		} else {
+			q = `SELECT o.id, o.user_id, o.total, o.status, o.created_at,
+			COALESCE(json_agg(json_build_object('id', oi.id, 'product_id', oi.product_id, 'qty', oi.qty, 'price', oi.price)) FILTER (WHERE oi.id IS NOT NULL), '[]') AS items
+			FROM orders o
+			LEFT JOIN order_items oi ON oi.order_id = o.id
+			WHERE o.user_id=$1
+			GROUP BY o.id ORDER BY o.id`;
+			vals = [req.user.id];
+		}
+		const r = await pool.query(q, vals);
+		res.json(r.rows);
+	} catch (err) {
+		console.error('Error listing orders:', err.message || err);
+		res.status(500).json({ error: 'Server error' });
+	}
+});
+
+app.get('/api/orders/:id', authMiddleware, async (req, res) => {
+	const id = Number(req.params.id);
+	try {
+		const q = `SELECT o.id, o.user_id, o.total, o.status, o.created_at,
+		COALESCE(json_agg(json_build_object('id', oi.id, 'product_id', oi.product_id, 'qty', oi.qty, 'price', oi.price)) FILTER (WHERE oi.id IS NOT NULL), '[]') AS items
+		FROM orders o
+		LEFT JOIN order_items oi ON oi.order_id = o.id
+		WHERE o.id=$1
+		GROUP BY o.id LIMIT 1`;
+		const r = await pool.query(q, [id]);
+		if (r.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+		const order = r.rows[0];
+		if (!req.user.is_admin && order.user_id !== req.user.id) return res.status(403).json({ error: 'Access denied' });
+		res.json(order);
+	} catch (err) {
+		console.error('Error getting order:', err.message || err);
+		res.status(500).json({ error: 'Server error' });
+	}
+});
+
 // duplicate routes without /api prefix to match professor examples
 app.get('/users', authMiddleware, adminOnly, async (req, res) => {
 	try {
@@ -307,13 +506,23 @@ app.put('/api/users/:id/role', authMiddleware, adminOnly, async (req, res) => {
 	}
 });
 
-// Serve static frontend build if present
+// Serve static frontend build if present (only when build exists)
 const staticPath = path.join(__dirname, '..', '..', 'frontend_build');
-app.use(express.static(staticPath));
-app.get(/.*/, (req, res) => {
-	res.sendFile(path.join(staticPath, 'index.html'));
-});
+const indexHtml = path.join(staticPath, 'index.html');
+if (fs.existsSync(indexHtml)) {
+	app.use(express.static(staticPath));
+	app.get(/.*/, (req, res) => {
+		res.sendFile(indexHtml);
+	});
+} else {
+	console.log(`Frontend build not found at ${indexHtml} — serving API only.`);
+	app.get('/', (req, res) => res.json({ message: 'API running. Frontend build not found.' }));
+}
 
-app.listen(PORT, () => {
-	console.log(`Servidor corriendo en http://localhost:${PORT}`);
-});
+if (process.env.NODE_ENV !== 'test') {
+	app.listen(PORT, () => {
+		console.log(`Servidor corriendo en http://localhost:${PORT}`);
+	});
+}
+
+export default app;

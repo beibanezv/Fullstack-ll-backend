@@ -1,0 +1,83 @@
+{
+  "info": {
+    "name": "PerfumeStore API",
+    "_postman_id": "perfumestore-collection-001",
+    "description": "Colección Postman para PerfumeStore - endpoints principales",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:5000" },
+    { "key": "token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Auth / Login",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"email\": \"admin@duoc.cl\",\n  \"password\": \"admin123\"\n}" },
+        "url": { "raw": "{{base_url}}/api/auth/login", "host": ["{{base_url}}"], "path": ["api","auth","login"] }
+      }
+    },
+    {
+      "name": "Public / Mensaje",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{base_url}}/api/mensaje", "host": ["{{base_url}}"], "path": ["api","mensaje"] }
+      }
+    },
+    {
+      "name": "Products - List",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{base_url}}/api/products", "host": ["{{base_url}}"], "path": ["api","products"] }
+      }
+    },
+    {
+      "name": "Products - Create (admin)",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{token}}" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Perfume Test\",\n  \"description\": \"Demo\",\n  \"price\": 19990,\n  \"category\": \"Femenino\",\n  \"image_url\": \"\",\n  \"stock\": 5\n}" },
+        "url": { "raw": "{{base_url}}/api/products", "host": ["{{base_url}}"], "path": ["api","products"] }
+      }
+    },
+    {
+      "name": "Announcements - List (admin)",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer {{token}}" } ],
+        "url": { "raw": "{{base_url}}/api/announcements", "host": ["{{base_url}}"], "path": ["api","announcements"] }
+      }
+    },
+    {
+      "name": "Announcements - Create (admin)",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{token}}" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"text\": \"Oferta desde Postman - 5%\",\n  \"active\": true\n}" },
+        "url": { "raw": "{{base_url}}/api/announcements", "host": ["{{base_url}}"], "path": ["api","announcements"] }
+      }
+    },
+    {
+      "name": "Orders - Create (user)",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{token}}" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"items\": [ { \"product_id\": 1, \"qty\": 1 } ]\n}" },
+        "url": { "raw": "{{base_url}}/api/orders", "host": ["{{base_url}}"], "path": ["api","orders"] }
+      }
+    },
+    {
+      "name": "Contact - Send",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Cliente\",\n  \"email\": \"cliente@example.com\",\n  \"message\": \"Hola equipo\"\n}" },
+        "url": { "raw": "{{base_url}}/api/contact", "host": ["{{base_url}}"], "path": ["api","contact"] }
+      }
+    }
+  ]
+}
