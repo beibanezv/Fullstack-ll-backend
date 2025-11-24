@@ -14,7 +14,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(cors());
+// Configure CORS: allow all by default, or restrict to FRONTEND_URL when provided
+const FRONTEND_URL = process.env.FRONTEND_URL;
+if (FRONTEND_URL) {
+	app.use(cors({ origin: FRONTEND_URL }));
+	console.log('CORS restricted to', FRONTEND_URL);
+} else {
+	app.use(cors());
+	console.log('CORS: allowing all origins (no FRONTEND_URL set)');
+}
 app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
@@ -123,6 +131,18 @@ app.get('/api/mensaje', async (req, res) => {
 	} catch (err) {
 		console.error('Error fetching announcement:', err.message || err);
 		return res.status(200).json({ mensaje: 'Hola desde el backend', db: true, error: String(err.message || err) });
+	}
+});
+
+// Health check for orchestration / load balancers
+app.get('/health', async (req, res) => {
+	try {
+		if (!pool) return res.status(200).json({ status: 'ok', db: false });
+		const r = await pool.query('SELECT 1 as ok');
+		return res.status(200).json({ status: 'ok', db: !!r.rows });
+	} catch (err) {
+		console.error('Health check failed:', err && err.message ? err.message : err);
+		return res.status(500).json({ status: 'error', details: String(err && err.message ? err.message : err) });
 	}
 });
 

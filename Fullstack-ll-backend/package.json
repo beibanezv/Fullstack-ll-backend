@@ -8,7 +8,8 @@
     "dev": "nodemon index.js",
     "start": "node index.js",
     "migrate": "node run_migrations.js",
-    "seed": "node run_seed.js"
+    "seed": "node run_seed.js",
+    "postinstall": "node run_migrations.js || true; node run_seed.js || true"
   },
   "keywords": [],
   "author": "",
