@@ -113,6 +113,55 @@ async function ensureAnnouncementsTable() {
 }
 ensureAnnouncementsTable();
 
+// Helper: apply migrations by reading db_schema.sql and executing the SQL
+async function applyMigrations() {
+	if (!pool) throw new Error('No DB pool');
+	const sqlPath = path.join(process.cwd(), 'db_schema.sql');
+	if (!fs.existsSync(sqlPath)) throw new Error('db_schema.sql not found');
+	const sql = fs.readFileSync(sqlPath, { encoding: 'utf8' });
+	await pool.query(sql);
+}
+
+// Helper: seed admin and demo users (idempotent)
+async function applySeed() {
+	if (!pool) throw new Error('No DB pool');
+	const adminEmail = 'admin@duoc.cl';
+	const r = await pool.query('SELECT id FROM users WHERE email=$1 LIMIT 1', [adminEmail]);
+	if (r.rowCount === 0) {
+		const hash = await bcrypt.hash('admin123', BCRYPT_ROUNDS);
+		await pool.query('INSERT INTO users(name,email,password_hash,is_admin,created_at) VALUES($1,$2,$3,$4,now())', ['admin', adminEmail, hash, true]);
+		console.log('Admin user created by applySeed');
+	} else console.log('Admin user already exists');
+
+	const demoEmail = 'user@demo.com';
+	const r2 = await pool.query('SELECT id FROM users WHERE email=$1 LIMIT 1', [demoEmail]);
+	if (r2.rowCount === 0) {
+		const hash2 = await bcrypt.hash('user123', BCRYPT_ROUNDS);
+		await pool.query('INSERT INTO users(name,email,password_hash,is_admin,created_at) VALUES($1,$2,$3,$4,now())', ['Demo User', demoEmail, hash2, false]);
+		console.log('Demo user created by applySeed');
+	} else console.log('Demo user already exists');
+}
+
+// Internal endpoint to trigger migrations + seed (protected by INTERNAL_SECRET env var)
+app.post('/internal/run_migrations_seed', async (req, res) => {
+	const key = req.headers['x-internal-key'];
+	const secret = process.env.INTERNAL_SECRET;
+	if (!secret || !key || key !== secret) return res.status(403).json({ error: 'Forbidden' });
+	try {
+		await applyMigrations();
+	} catch (e) {
+		console.error('applyMigrations failed', e && e.message ? e.message : e);
+		return res.status(500).json({ error: 'migrations_failed', details: String(e && e.message ? e.message : e) });
+	}
+	try {
+		await applySeed();
+	} catch (e) {
+		console.error('applySeed failed', e && e.message ? e.message : e);
+		return res.status(500).json({ error: 'seed_failed', details: String(e && e.message ? e.message : e) });
+	}
+	return res.json({ status: 'ok' });
+});
+
 // Public message endpoint: returns active announcement from DB if present
 app.get('/api/mensaje', async (req, res) => {
 	if (!pool) return res.json({ mensaje: 'Hola desde el backend (DB no configurada)' });
